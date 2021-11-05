@@ -24,6 +24,8 @@ try:
 except ImportError:
     pass
 
+G = {}
+
 
 def get_sparse_matrix_from_indices_distances_umap(
     knn_indices, knn_dists, n_obs, n_neighbors
@@ -171,7 +173,11 @@ def query_tree(data, ckd, params):
     return ckdout
 
 
-def _get_indices(batch_from, batch_to, pca, batch_list, params):
+def _get_indices(args):
+    batch_from, batch_to = args
+    pca = G["pca"]
+    batch_list = G["batch_list"]
+    params = G["params"]
 
     mask_to = batch_list == batch_to
     ind_to = np.arange(len(batch_list))[mask_to]
@@ -198,7 +204,7 @@ def _get_indices(batch_from, batch_to, pca, batch_list, params):
     return ckdout, ind_from, col_range
 
 
-def get_graph(pca, batch_list, params):
+def get_graph(pca, batch_list, params, progress=True):
     """
     Identify the KNN structure to be used in graph construction. All input as in ``bbknn.bbknn()``
     and ``bbknn.matrix.bbknn()``. Returns a tuple of distances and indices of neighbours for
@@ -222,10 +228,19 @@ def get_graph(pca, batch_list, params):
     knn_indices = np.copy(knn_distances).astype(int)
     batch_combos = list(itertools.product(batches, batches))
 
-    args = [(b[0], b[1], pca, batch_list, params) for b in batch_combos]
+    G["pca"] = pca
+    G["batch_list"] = batch_list
+    G["params"] = params
 
+    args = [(b[0], b[1]) for b in batch_combos]
+    results = []
     with multiprocessing.Pool() as pool:
-        results = pool.starmap(_get_indices, args)
+         for result in tqdm(
+                pool.imap_unordered(_get_indices, args),
+                total=len(args),
+                disable=(not progress),
+            ):
+                results.append(result)
 
     for res in results:
         ckdout, ind_from, col_range = res
@@ -341,6 +356,7 @@ def bbknn(
     metric="euclidean",
     set_op_mix_ratio=1,
     local_connectivity=1,
+    progress=True
 ):
     """
     Scanpy-independent BBKNN variant that runs on a PCA matrix and list of per-cell batch assignments instead of
@@ -377,7 +393,7 @@ def bbknn(
     params = check_knn_metric(params, counts)
     # obtain the batch balanced KNN graph
     knn_distances, knn_indices = get_graph(
-        pca=pca, batch_list=batch_list, params=params
+        pca=pca, batch_list=batch_list, params=params, progress=progress
     )
     # sort the neighbours so that they're actually in order from closest to furthest
     newidx = np.argsort(knn_distances, axis=1)
