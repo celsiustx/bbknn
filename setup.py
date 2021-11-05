@@ -1,10 +1,10 @@
 from setuptools import setup, find_packages
 
 setup(
-    name="bbknn",
+    name="ccknn",
     version="1.5.1",
-    description="Batch balanced KNN",
-    url="https://github.com/Teichlab/bbknn",
+    description="class-comparable KNN",
+    url="https://github.com/celsiustx/bbknn",
     packages=find_packages(exclude=["docs", "figures", "examples"]),
     install_requires=[
         "Cython",
