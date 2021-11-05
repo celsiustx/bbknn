@@ -247,7 +247,7 @@ def get_graph(pca, batch_list, params, progress=True):
         knn_indices[ind_from[:, None], col_range[None, :]] = ckdout[1]
         knn_distances[ind_from[:, None], col_range[None, :]] = ckdout[0]
 
-    return knn_indices, knn_distances
+    return knn_distances, knn_indices
 
 
 def check_knn_metric(params, counts, scanpy_logging=False):
