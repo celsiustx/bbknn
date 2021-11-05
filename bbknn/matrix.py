@@ -1,6 +1,8 @@
 import pandas as pd
 import numpy as np
 import scipy
+import itertools
+import multiprocessing
 import types
 import sys
 from annoy import AnnoyIndex
@@ -12,6 +14,7 @@ from umap.umap_ import fuzzy_simplicial_set
 from sklearn.neighbors import KDTree
 from sklearn.neighbors import DistanceMetric
 
+
 try:
     from scanpy import logging as logg
 except ImportError:
@@ -20,6 +23,8 @@ try:
     import faiss
 except ImportError:
     pass
+
+G = {}
 
 
 def get_sparse_matrix_from_indices_distances_umap(
@@ -168,7 +173,38 @@ def query_tree(data, ckd, params):
     return ckdout
 
 
-def get_graph(pca, batch_list, params):
+def _get_indices(args):
+    batch_from, batch_to = args
+    pca = G["pca"]
+    batch_list = G["batch_list"]
+    params = G["params"]
+
+    mask_to = batch_list == batch_to
+    ind_to = np.arange(len(batch_list))[mask_to]
+
+    mask_from = batch_list == batch_from
+    ind_from = np.arange(len(batch_list))[mask_from]
+
+    batches = np.unique(batch_list)
+
+    ckd = create_tree(data=pca[mask_to, : params["n_pcs"]], params=params)
+
+    ckdout = query_tree(data=pca[mask_from, : params["n_pcs"]], ckd=ckd, params=params)
+    for i in range(ckdout[1].shape[0]):
+        for j in range(ckdout[1].shape[1]):
+            ckdout[1][i, j] = ind_to[ckdout[1][i, j]]
+
+    to_ind = np.where(batches == batch_to)[0][0]
+
+    col_range = np.arange(
+        to_ind * params["neighbors_within_batch"],
+        (to_ind + 1) * params["neighbors_within_batch"],
+    )
+
+    return ckdout, ind_from, col_range
+
+
+def get_graph(pca, batch_list, params, progress=True):
     """
     Identify the KNN structure to be used in graph construction. All input as in ``bbknn.bbknn()``
     and ``bbknn.matrix.bbknn()``. Returns a tuple of distances and indices of neighbours for
@@ -190,40 +226,28 @@ def get_graph(pca, batch_list, params):
         (pca.shape[0], params["neighbors_within_batch"] * len(batches))
     )
     knn_indices = np.copy(knn_distances).astype(int)
-    # find the knns using faiss/cKDTree/KDTree/annoy
-    # need to compare each batch against each batch (including itself)
-    for to_ind in range(len(batches)):
-        # this is the batch that will be used as the neighbour pool
-        # create a boolean mask identifying the cells within this batch
-        # and then get the corresponding row numbers for later use
-        batch_to = batches[to_ind]
-        mask_to = batch_list == batch_to
-        ind_to = np.arange(len(batch_list))[mask_to]
-        # create the faiss/cKDTree/KDTree/annoy, depending on approx/metric
-        ckd = create_tree(data=pca[mask_to, : params["n_pcs"]], params=params)
-        for from_ind in range(len(batches)):
-            # this is the batch that will have its neighbours identified
-            # repeat the mask/row number getting
-            batch_from = batches[from_ind]
-            mask_from = batch_list == batch_from
-            ind_from = np.arange(len(batch_list))[mask_from]
-            # fish the neighbours out, getting a (distances, indices) tuple back
-            ckdout = query_tree(
-                data=pca[mask_from, : params["n_pcs"]], ckd=ckd, params=params
-            )
-            # the identified indices are relative to the subsetted PCA matrix
-            # so we need to convert it back to the original row numbers
-            for i in range(ckdout[1].shape[0]):
-                for j in range(ckdout[1].shape[1]):
-                    ckdout[1][i, j] = ind_to[ckdout[1][i, j]]
-            # save the results within the appropriate rows and columns of the structures
-            col_range = np.arange(
-                to_ind * params["neighbors_within_batch"],
-                (to_ind + 1) * params["neighbors_within_batch"],
-            )
-            knn_indices[ind_from[:, None], col_range[None, :]] = ckdout[1]
-            knn_distances[ind_from[:, None], col_range[None, :]] = ckdout[0]
-    return knn_distances, knn_indices
+    batch_combos = list(itertools.product(batches, batches))
+
+    G["pca"] = pca
+    G["batch_list"] = batch_list
+    G["params"] = params
+
+    args = [(b[0], b[1]) for b in batch_combos]
+    results = []
+    with multiprocessing.Pool() as pool:
+         for result in tqdm(
+                pool.imap_unordered(_get_indices, args),
+                total=len(args),
+                disable=(not progress),
+            ):
+                results.append(result)
+
+    for res in results:
+        ckdout, ind_from, col_range = res
+        knn_indices[ind_from[:, None], col_range[None, :]] = ckdout[1]
+        knn_distances[ind_from[:, None], col_range[None, :]] = ckdout[0]
+
+    return knn_indices, knn_distances
 
 
 def check_knn_metric(params, counts, scanpy_logging=False):
@@ -303,24 +327,18 @@ def trimming(cnts, trim):
     cnts : ``CSR``
             Sparse matrix of processed connectivities to trim.
     """
-    vals = np.zeros(cnts.shape[0])
-    for i in range(cnts.shape[0]):
-        # Get the row slice, not a copy, only the non zero elements
-        row_array = cnts.data[cnts.indptr[i] : cnts.indptr[i + 1]]
-        if row_array.shape[0] <= trim:
-            continue
-        # fish out the threshold value
-        vals[i] = row_array[np.argsort(row_array)[-1 * trim]]
-    for iter in range(2):
-        # filter rows, flip, filter columns using the same thresholds
-        for i in range(cnts.shape[0]):
-            # Get the row slice, not a copy, only the non zero elements
-            row_array = cnts.data[cnts.indptr[i] : cnts.indptr[i + 1]]
-            # apply cutoff
-            row_array[row_array < vals[i]] = 0
-        cnts.eliminate_zeros()
-        cnts = cnts.T.tocsr()
-    return cnts
+
+    from ctxbio.stats.utils import row_topk_csr
+    indptr = cnts.indptr
+    indices, data = row_topk_csr(
+                    cnts.data,
+                    cnts.indices,
+                    cnts.indptr,
+                    trim,
+                )
+    indptr = np.arange(0, data.flatten().shape[0] + 1, trim)
+    new_cnts = scipy.sparse.csr_matrix((data.flatten(), indices.flatten(), indptr))
+    return new_cnts
 
 
 def bbknn(
@@ -338,6 +356,7 @@ def bbknn(
     metric="euclidean",
     set_op_mix_ratio=1,
     local_connectivity=1,
+    progress=True
 ):
     """
     Scanpy-independent BBKNN variant that runs on a PCA matrix and list of per-cell batch assignments instead of
@@ -374,7 +393,7 @@ def bbknn(
     params = check_knn_metric(params, counts)
     # obtain the batch balanced KNN graph
     knn_distances, knn_indices = get_graph(
-        pca=pca, batch_list=batch_list, params=params
+        pca=pca, batch_list=batch_list, params=params, progress=progress
     )
     # sort the neighbours so that they're actually in order from closest to furthest
     newidx = np.argsort(knn_distances, axis=1)
