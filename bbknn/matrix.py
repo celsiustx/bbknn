@@ -1,6 +1,8 @@
 import pandas as pd
 import numpy as np
 import scipy
+import itertools
+import multiprocessing
 import types
 import sys
 from annoy import AnnoyIndex
@@ -11,6 +13,7 @@ from scipy.sparse import coo_matrix
 from umap.umap_ import fuzzy_simplicial_set
 from sklearn.neighbors import KDTree
 from sklearn.neighbors import DistanceMetric
+
 
 try:
     from scanpy import logging as logg
