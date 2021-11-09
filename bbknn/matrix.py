@@ -234,6 +234,7 @@ def get_graph(pca, batch_list, params, progress=True):
 
     args = [(b[0], b[1]) for b in batch_combos]
     results = []
+    from tqdm.autonotebook import tqdm
     with multiprocessing.Pool() as pool:
          for result in tqdm(
                 pool.imap_unordered(_get_indices, args),
