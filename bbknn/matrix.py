@@ -235,13 +235,14 @@ def get_graph(pca, batch_list, params, progress=True):
     args = [(b[0], b[1]) for b in batch_combos]
     results = []
     from tqdm.autonotebook import tqdm
+
     with multiprocessing.Pool() as pool:
-         for result in tqdm(
-                pool.imap_unordered(_get_indices, args),
-                total=len(args),
-                disable=(not progress),
-            ):
-                results.append(result)
+        for result in tqdm(
+            pool.imap_unordered(_get_indices, args),
+            total=len(args),
+            disable=(not progress),
+        ):
+            results.append(result)
 
     for res in results:
         ckdout, ind_from, col_range = res
@@ -322,24 +323,29 @@ def trimming(cnts, trim):
     """
     Trims the graph to the top connectivities for each cell. All undescribed input as in
     ``bbknn.bbknn()``.
-
     Input
     -----
     cnts : ``CSR``
             Sparse matrix of processed connectivities to trim.
     """
-
-    from ctxbio.stats.utils import row_topk_csr
-    indptr = cnts.indptr
-    indices, data = row_topk_csr(
-                    cnts.data,
-                    cnts.indices,
-                    cnts.indptr,
-                    trim,
-                )
-    indptr = np.arange(0, data.flatten().shape[0] + 1, trim)
-    new_cnts = scipy.sparse.csr_matrix((data.flatten(), indices.flatten(), indptr))
-    return new_cnts
+    vals = np.zeros(cnts.shape[0])
+    for i in range(cnts.shape[0]):
+        # Get the row slice, not a copy, only the non zero elements
+        row_array = cnts.data[cnts.indptr[i] : cnts.indptr[i + 1]]
+        if row_array.shape[0] <= trim:
+            continue
+        # fish out the threshold value
+        vals[i] = row_array[np.argsort(row_array)[-1 * trim]]
+    for iter in range(2):
+        # filter rows, flip, filter columns using the same thresholds
+        for i in range(cnts.shape[0]):
+            # Get the row slice, not a copy, only the non zero elements
+            row_array = cnts.data[cnts.indptr[i] : cnts.indptr[i + 1]]
+            # apply cutoff
+            row_array[row_array < vals[i]] = 0
+        cnts.eliminate_zeros()
+        cnts = cnts.T.tocsr()
+    return cnts
 
 
 def bbknn(
@@ -357,7 +363,7 @@ def bbknn(
     metric="euclidean",
     set_op_mix_ratio=1,
     local_connectivity=1,
-    progress=True
+    progress=True,
 ):
     """
     Scanpy-independent BBKNN variant that runs on a PCA matrix and list of per-cell batch assignments instead of
